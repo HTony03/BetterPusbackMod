@@ -24,68 +24,73 @@ jobs:
           path: BetterPusbackMod
           fetch-depth: 0
 
-      - name: Checkout libacfutils (sibling)
-        run: |
-          git clone https://github.com/olivierbutler/libacfutils.git
-          # libacfutils pins its only submodule, mingw-std-threads, at commit
-          # c49f399, which no longer exists upstream (meganz force-pushed it
-          # away). Clone current master (c931bac) instead; it is header-only
-          # and only used for the Windows cross-compile.
-          git clone https://github.com/meganz/mingw-std-threads.git \
-            libacfutils/mingw-std-threads
-          git -C libacfutils/mingw-std-threads checkout \
-            c931bac289dd431f1dd30fc4a5d1a7be36668073
-
       # ------------------------------------------------------------------
-      # 2. Toolchain. Mirrors Dockerfile.win-lin in this repo, plus the
-      #    packages libacfutils needs (its install-ubuntu-packages script).
+      # 2. Toolchain. Union of this repo's Dockerfile.win-lin and
+      #    libacfutils' install-ubuntu-packages (autoconf/automake/libtool/
+      #    unzip are required by the dependency build scripts).
       # ------------------------------------------------------------------
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake zip gettext git \
-            libgl1-mesa-dev qt5-qmake qtbase5-dev \
-            mingw-w64 gcc-mingw-w64 g++-mingw-w64 libz-mingw-w64-dev \
-            pkg-config libasound2-dev portaudio19-dev libpulse-dev \
-            libsoundio-dev libx11-dev libxcursor-dev
-          # If libacfutils ships its own package list, apply it too.
-          if [ -f libacfutils/install-ubuntu-packages ]; then
-            sudo bash libacfutils/install-ubuntu-packages || true
-          fi
+            build-essential cmake pkg-config gettext git zip unzip \
+            automake autoconf libtool \
+            libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxcursor-dev \
+            libasound2-dev libpulse-dev portaudio19-dev libsoundio-dev \
+            qtbase5-dev qtchooser qt5-qmake qtbase5-dev-tools \
+            mingw-w64 gcc-mingw-w64 g++-mingw-w64 libz-mingw-w64-dev
 
       # ------------------------------------------------------------------
-      # 3. Build libacfutils' vendored third-party libraries
-      #    (glew, openal, cairo, freetype, pcre2, libpng, libxml2, opus,
-      #     ssl, curl, iconv, zlib, lzma, ...) for both linux64 and win64.
-      #    This is the long step (tens of minutes).
-      #    NOTE: `build_deps` is libacfutils' own script; if your fork
-      #    names it differently, adjust this step.
+      # 3. Resolve the libacfutils revision so the dependency cache below
+      #    is reused until that repo actually changes.
       # ------------------------------------------------------------------
-      - name: Build libacfutils dependencies
+      - name: Resolve libacfutils revision
+        id: acf
         run: |
+          echo "sha=$(git ls-remote https://github.com/olivierbutler/libacfutils.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 4. Cache the fully built libacfutils tree (source + compiled
+      #    third-party deps + libacfutils.a for both platforms). Without
+      #    this, build_deps+build_redist recompiles ~14 libraries on every
+      #    single run. Bump the v1 suffix to force a rebuild.
+      # ------------------------------------------------------------------
+      - name: Cache built libacfutils
+        id: acf-cache
+        uses: actions/cache@v4
+        with:
+          path: libacfutils
+          key: libacfutils-v1-${{ runner.os }}-${{ steps.acf.outputs.sha }}
+
+      # ------------------------------------------------------------------
+      # 5. Build libacfutils, only on a cache miss.
+      #    Two stages, per libacfutils/README-docker.md:
+      #      ./build_deps   - compile vendored third-party libraries
+      #      ./build_redist - build libacfutils.a (via qmake/build-win-lin)
+      #                       for win64 + lin64
+      # ------------------------------------------------------------------
+      - name: Build libacfutils (deps + library)
+        if: steps.acf-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/olivierbutler/libacfutils.git libacfutils
           cd libacfutils
+
+          # libacfutils records its mingw-std-threads submodule at c49f399,
+          # which no longer exists upstream (meganz force-pushed it away).
+          # Repoint that gitlink at reachable 6c2061b7 - the commit build_deps
+          # itself checks out - so the submodule fetch succeeds. The modern
+          # comma syntax is tried first, then the legacy space syntax.
+          git update-index --cacheinfo \
+            "160000,6c2061b7da41d6aa1b2162ff4383ec3ece864bc6,mingw-std-threads" \
+            || git update-index --cacheinfo 160000 \
+               6c2061b7da41d6aa1b2162ff4383ec3ece864bc6 mingw-std-threads
+          git submodule update --init --recursive
+
           ./build_deps
+          ./build_redist
 
       # ------------------------------------------------------------------
-      # 4. Build libacfutils.a itself (the static library the plugin links).
-      #    src/CMakeLists.txt links ${LIBACFUTILS}/qmake/${PLAT}/libacfutils.a
-      #    (PLAT = lin64 | win64). VERIFY the exact qmake invocation for
-      #    your fork; the two lines below are the canonical build.
-      # ------------------------------------------------------------------
-      - name: Build libacfutils library (linux64 + win64)
-        run: |
-          cd libacfutils/qmake
-          # native (linux64)
-          qmake && make clean && make -j"$(nproc)"
-          # windows cross-compile (win64) via mingw toolchain file
-          qmake -spec linux-g++ -after "CONFIG+=mingw" 2>/dev/null \
-            || true
-          # fallback marker: if the fork builds win64 differently, replace
-          # the cross-compile line above.
-
-      # ------------------------------------------------------------------
-      # 5. Build the plugin and assemble the full install tree.
+      # 6. Build the plugin and assemble the full install tree.
       #    build_release runs build_xpl.sh (win + lin .xpl) and copies all
       #    data/ assets into ./BetterPushback/. It does NOT zip, so we do.
       # ------------------------------------------------------------------
@@ -100,7 +105,7 @@ jobs:
           zip -r "BetterPushback_${GITHUB_SHA::8}.zip" BetterPushback/
 
       # ------------------------------------------------------------------
-      # 6. Artifacts: the full installable zip plus the bare .xpl files.
+      # 7. Artifacts: the full installable zip plus the bare .xpl files.
       # ------------------------------------------------------------------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -24,9 +24,17 @@ jobs:
           path: BetterPusbackMod
           fetch-depth: 0
 
-      - name: Checkout libacfutils (sibling, recursive for submodules)
+      - name: Checkout libacfutils (sibling)
         run: |
-          git clone --recursive https://github.com/olivierbutler/libacfutils.git
+          git clone https://github.com/olivierbutler/libacfutils.git
+          # libacfutils pins its only submodule, mingw-std-threads, at commit
+          # c49f399, which no longer exists upstream (meganz force-pushed it
+          # away). Clone current master (c931bac) instead; it is header-only
+          # and only used for the Windows cross-compile.
+          git clone https://github.com/meganz/mingw-std-threads.git \
+            libacfutils/mingw-std-threads
+          git -C libacfutils/mingw-std-threads checkout \
+            c931bac289dd431f1dd30fc4a5d1a7be36668073
 
       # ------------------------------------------------------------------
       # 2. Toolchain. Mirrors Dockerfile.win-lin in this repo, plus the

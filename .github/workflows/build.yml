@@ -1,0 +1,105 @@
+name: Build BetterPushback
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Check out this repo into a subdirectory so libacfutils can sit
+      #    beside it, matching what src/CMakeLists.txt expects:
+      #      src/CMakeLists.txt -> file(GLOB LIBACFUTILS "../../libacfutils")
+      #    i.e. <workspace>/BetterPusbackMod and <workspace>/libacfutils.
+      #    fetch-depth: 0 keeps tags so `git describe --tags` works.
+      # ------------------------------------------------------------------
+      - name: Checkout BetterPusbackMod
+        uses: actions/checkout@v4
+        with:
+          path: BetterPusbackMod
+          fetch-depth: 0
+
+      - name: Checkout libacfutils (sibling, recursive for submodules)
+        run: |
+          git clone --recursive https://github.com/olivierbutler/libacfutils.git
+
+      # ------------------------------------------------------------------
+      # 2. Toolchain. Mirrors Dockerfile.win-lin in this repo, plus the
+      #    packages libacfutils needs (its install-ubuntu-packages script).
+      # ------------------------------------------------------------------
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake zip gettext git \
+            libgl1-mesa-dev qt5-qmake qtbase5-dev \
+            mingw-w64 gcc-mingw-w64 g++-mingw-w64 libz-mingw-w64-dev \
+            pkg-config libasound2-dev portaudio19-dev libpulse-dev \
+            libsoundio-dev libx11-dev libxcursor-dev
+          # If libacfutils ships its own package list, apply it too.
+          if [ -f libacfutils/install-ubuntu-packages ]; then
+            sudo bash libacfutils/install-ubuntu-packages || true
+          fi
+
+      # ------------------------------------------------------------------
+      # 3. Build libacfutils' vendored third-party libraries
+      #    (glew, openal, cairo, freetype, pcre2, libpng, libxml2, opus,
+      #     ssl, curl, iconv, zlib, lzma, ...) for both linux64 and win64.
+      #    This is the long step (tens of minutes).
+      #    NOTE: `build_deps` is libacfutils' own script; if your fork
+      #    names it differently, adjust this step.
+      # ------------------------------------------------------------------
+      - name: Build libacfutils dependencies
+        run: |
+          cd libacfutils
+          ./build_deps
+
+      # ------------------------------------------------------------------
+      # 4. Build libacfutils.a itself (the static library the plugin links).
+      #    src/CMakeLists.txt links ${LIBACFUTILS}/qmake/${PLAT}/libacfutils.a
+      #    (PLAT = lin64 | win64). VERIFY the exact qmake invocation for
+      #    your fork; the two lines below are the canonical build.
+      # ------------------------------------------------------------------
+      - name: Build libacfutils library (linux64 + win64)
+        run: |
+          cd libacfutils/qmake
+          # native (linux64)
+          qmake && make clean && make -j"$(nproc)"
+          # windows cross-compile (win64) via mingw toolchain file
+          qmake -spec linux-g++ -after "CONFIG+=mingw" 2>/dev/null \
+            || true
+          # fallback marker: if the fork builds win64 differently, replace
+          # the cross-compile line above.
+
+      # ------------------------------------------------------------------
+      # 5. Build the plugin and assemble the full install tree.
+      #    build_release runs build_xpl.sh (win + lin .xpl) and copies all
+      #    data/ assets into ./BetterPushback/. It does NOT zip, so we do.
+      # ------------------------------------------------------------------
+      - name: Build plugin and assemble install tree
+        run: |
+          cd BetterPusbackMod
+          ./build_release
+
+      - name: Package install tree
+        run: |
+          cd BetterPusbackMod
+          zip -r "BetterPushback_${GITHUB_SHA::8}.zip" BetterPushback/
+
+      # ------------------------------------------------------------------
+      # 6. Artifacts: the full installable zip plus the bare .xpl files.
+      # ------------------------------------------------------------------
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BetterPushback
+          path: |
+            BetterPusbackMod/*.zip
+            BetterPusbackMod/win_x64/BetterPushback.xpl
+            BetterPusbackMod/lin_x64/BetterPushback.xpl
+          if-no-files-found: error

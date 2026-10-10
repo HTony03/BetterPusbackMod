@@ -105,14 +105,13 @@ jobs:
           zip -r "BetterPushback_${GITHUB_SHA::8}.zip" BetterPushback/
 
       # ------------------------------------------------------------------
-      # 7. Artifacts: the full installable zip plus the bare .xpl files.
+      # 7. Artifact: only the complete, installable plugin zip. The bare
+      #    win_x64/lin_x64 .xpl files are deliberately not uploaded; the
+      #    zip already contains both of them plus all data/ assets.
       # ------------------------------------------------------------------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: BetterPushback
-          path: |
-            BetterPusbackMod/*.zip
-            BetterPusbackMod/win_x64/BetterPushback.xpl
-            BetterPusbackMod/lin_x64/BetterPushback.xpl
+          path: BetterPusbackMod/*.zip
           if-no-files-found: error
